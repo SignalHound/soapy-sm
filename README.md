@@ -13,19 +13,10 @@
 
 1. Libusb 1.0 
     ~~~
-    $ sudo aot-get update
+    $ sudo apt-get update
     $ sudo apt-get install libusb-1.0-0
     ~~~
-2. FTDI D2XX library
-- grab latest 64-bit Linux driver from [FTDI Chip](www.ftdichip.com/Drivers/D2XX.htm) 
-- or find a copy of the library in the [Signal Hound SDK](https://signalhound.com/software/signal-hound-software-development-kit-sdk/) 
-    - standard path device_apis/sm_series/lib/linux/Ubuntu 18.04/libftd2xx.so
-        ~~~
-        $ sudo cp libftd2xx* /usr/local/lib
-        $ cd /usr/local/lib
-        $ sudo chmod 0755 libftd2xx.so
-        ~~~
-3. SM API
+2. SM API
 - grab shared object file from [Signal Hound SDK](https://signalhound.com/software/signal-hound-software-development-kit-sdk/) 
     ~~~
     $ cd device_apis/sm_series/lib/linux/Ubuntu 18.04
@@ -33,7 +24,7 @@
     $ sudo ldconfig -v -n /usr/local/lib
     $ sudo ln -sf /usr/local/lib/libsm_api.so.5 /usr/local/lib/libsm_api.so
     ~~~
-4. [SoapySDR](https://github.com/pothosware/PothosCore/wiki/Ubuntu).
+3. [SoapySDR](https://github.com/pothosware/PothosCore/wiki/Ubuntu).
 
 ## Installation
 
