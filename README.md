@@ -43,6 +43,7 @@
     $ sudo make install
     $ sudo ldconfig
     ~~~
+Note: MATLAB runtime LD_LIBRARY_PATH environment variable may cause conflicts with cmake
 
 Note: if a SM200B or SM435B device is plugged in, `SoapySDRUtil --find` will display its serial number.
 
