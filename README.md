@@ -29,8 +29,13 @@
     $ sudo ldconfig -v -n /usr/local/lib
     $ sudo ln -sf /usr/local/lib/libsm_api.so.5 /usr/local/lib/libsm_api.so
     ~~~
-3. [SoapySDR](https://github.com/pothosware/PothosCore/wiki/Ubuntu).
+3. [SoapySDR Dev Tools](https://github.com/pothosware/PothosCore/wiki/BuildGuide#ubuntu).
+    $ sudo apt-get install libsoapysdr-dev
 
+4. CMake
+    $ sudo apt-get install cmake
+5. G++
+    $ sudo apt-get install g++
 ## Installation
 
 1. Clone this repository.

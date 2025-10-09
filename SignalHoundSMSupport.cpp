@@ -10,6 +10,7 @@
 #include <iostream>
 #include <chrono>
 #include <thread>
+#include <mutex>
 
 // Signal Hound API
 #include "sm_api.h"
@@ -23,11 +24,12 @@
 class SignalHoundSM : public SoapySDR::Device {
 private:
     // Variables used
-    bool streamActive, serialSpecified, autoAtten, readMut;
+    mutable std::mutex devMutex;
+    bool serialSpecified;
     int deviceId, serial, decimation, numDevices, type; 
     int serials[SM_MAX_DEVICES];
     SmDeviceType types[SM_MAX_DEVICES];
-    double sampleRate, centerFrequency, bandwidth, refLevel, attenLevel;
+    double sampleRate, centerFrequency, bandwidth, attenLevel;
     SmStatus status;
 
     // Decimation to max bandwidth with filters
@@ -69,10 +71,7 @@ public:
     SignalHoundSM(const SoapySDR::Kwargs &args) 
     {
         // Defaults
-        streamActive = false;
         serialSpecified = false;
-        autoAtten = false;
-        readMut = false;
         deviceId = -1;
         serial = 0;
         decimation = 1;
@@ -81,7 +80,6 @@ public:
         sampleRate = 61.44e6;
         centerFrequency = 100e6;
         bandwidth = 41.5e6;
-        refLevel = -20;
         attenLevel = -1;
 
         // Read provided serial
@@ -153,7 +151,6 @@ public:
         smSetIQCenterFreq(deviceId, centerFrequency);
         smSetIQSampleRate(deviceId, decimation);
         smSetIQBandwidth(deviceId, smTrue, bandwidth);
-        smSetRefLevel(deviceId, refLevel);
         smSetAttenuator(deviceId, attenLevel);
     }
 
@@ -174,6 +171,7 @@ public:
 
     std::string getHardwareKey(void) const
     {
+        const std::lock_guard<std::mutex> lock(devMutex);
         if (type == smDeviceTypeSM200A) {
             return "Signal Hound SM200A";    
         } else if (type == smDeviceTypeSM200B) {
@@ -191,6 +189,7 @@ public:
 
     SoapySDR::Kwargs getHardwareInfo(void) const
     {
+        const std::lock_guard<std::mutex> lock(devMutex);
         // Get firmware info
         int firmmaj = 0;
         int firmmin = 0;
@@ -228,6 +227,7 @@ public:
 
     SoapySDR::Kwargs getChannelInfo(const int direction, const size_t channel) const
     {
+        const std::lock_guard<std::mutex> lock(devMutex);
         SoapySDR::Kwargs args;
         if (direction != SOAPY_SDR_RX or channel != 1) {
             return args;
@@ -275,6 +275,7 @@ public:
                                   const std::vector<size_t> &channels = std::vector<size_t>(),
                                   const SoapySDR::Kwargs &args = SoapySDR::Kwargs()) 
     {
+        const std::lock_guard<std::mutex> lock(devMutex);
         // Check channel config
         if (channels.size() > 1 or (channels.size() > 0 and channels.at(0) != 0)) {
             throw std::runtime_error("setupStream invalid channel selection");
@@ -295,8 +296,8 @@ public:
     }
 
     void closeStream(SoapySDR::Stream *stream) {
+        const std::lock_guard<std::mutex> lock(devMutex);
         smAbort(deviceId);
-        streamActive = false;
     }
 
     // size_t getStreamMTU(SoapySDR::Stream *stream) const{}
@@ -306,26 +307,19 @@ public:
                        const long long timeNs = 0,
                        const size_t numElems = 0) 
     {
+        const std::lock_guard<std::mutex> lock(devMutex);
         if (flags != 0) {
             return SOAPY_SDR_NOT_SUPPORTED;
         }
-        if (autoAtten) {
-            smSetRefLevel(deviceId, SM_DEFAULT_REF);
-            smSetAttenuator(deviceId, SM_AUTO_ATTEN);
-        } else {
-            smSetRefLevel(deviceId, refLevel);
-            smSetAttenuator(deviceId, attenLevel);
-        }
-        smSetIQSampleRate(deviceId, decimation);
+
         updateConfig();
-        streamActive = true;
         return 0;
     }
 
     int deactivateStream(SoapySDR::Stream *stream, const int flags = 0, const long long timeNs = 0)
     {
+        const std::lock_guard<std::mutex> lock(devMutex);
         status = smAbort(deviceId);
-        streamActive = false;
         return status;
     }
 
@@ -336,10 +330,7 @@ public:
                    long long &timeNs,
                    const long timeoutUs = 100000)
     {
-        if (readMut) {
-            std::this_thread::sleep_for(std::chrono::microseconds(timeoutUs));
-            return 0;
-        }
+        const std::lock_guard<std::mutex> lock(devMutex);
         // Start clock
         const auto start = std::chrono::high_resolution_clock::now();
 
@@ -403,53 +394,24 @@ public:
             return results; 
         }
         results.push_back("ATT");
-        results.push_back("REF");
         return results;
     }
 
     bool hasGainMode(const int direction, const size_t channel) const
     {
-        if (direction != SOAPY_SDR_RX and channel != 1) {
-            SoapySDR_logf(SOAPY_SDR_ERROR, "hasGainMode: invalid direction/channel");
-            return false; 
-        }
-        return true;
-    }
-
-    void setGainMode(const int direction, const size_t channel, const bool automatic)
-    {
-        if (direction != SOAPY_SDR_RX and channel != 1) {
-            SoapySDR_logf(SOAPY_SDR_ERROR, "setGainMode: invalid direction/channel");
-            return; 
-        }
-        if (automatic) {
-            autoAtten = true;
-        } else {
-            autoAtten = false;
-        }
-        updateConfig();
-    }
-
-    bool getGainMode(const int direction, const size_t channel) const
-    {
-        if (direction != SOAPY_SDR_RX and channel != 1) {
-            SoapySDR_logf(SOAPY_SDR_ERROR, "getGainMode: invalid direction/channel");
-            return false; 
-        }
-        return autoAtten;
+        return false;
     }
 
     // void setGain(const int direction, const size_t channel, const double value) {}
 
     void setGain(const int direction, const size_t channel, const std::string &name, const double value)
     {
+        const std::lock_guard<std::mutex> lock(devMutex);
         if (direction != SOAPY_SDR_RX and channel != 1) {
             SoapySDR_logf(SOAPY_SDR_ERROR, "setGain: invalid direction/channel");
             return; 
         }
-        if(name == "REF") {
-            refLevel = value;
-        } else if (name == "ATT") {
+        if (name == "ATT") {
             attenLevel = value;
         } else {
             // SoapySDR program should not get here
@@ -461,22 +423,13 @@ public:
 
     double getGain(const int direction, const size_t channel, const std::string &name) const
     {
+        const std::lock_guard<std::mutex> lock(devMutex);
         if (direction != SOAPY_SDR_RX and channel != 1) {
             SoapySDR_logf(SOAPY_SDR_ERROR, "getGain: invalid direction/channel");
             return SOAPY_SDR_NOT_SUPPORTED; 
         }
-        if (name=="REF") {
-            if (autoAtten) {
-                return SM_DEFAULT_REF;
-            } else {
-                return refLevel;
-            }
-        } else if (name == "ATT") {
-            if (autoAtten) {
-                return SM_AUTO_ATTEN;
-            } else {
-                return attenLevel;
-            }
+        if (name == "ATT") {
+            return attenLevel;
         } else {
             throw std::runtime_error(std::string("Unsupported GAIN ")+name);
         }
@@ -485,10 +438,8 @@ public:
 
     SoapySDR::Range getGainRange(const int direction, const size_t channel, const std::string &name) const
     {
-        if (name == "REF") {
-            return SoapySDR::Range(-160, 20);
-        } else if (name == "ATT") {
-            return SoapySDR::Range(0, 6);
+        if (name == "ATT") {
+            return SoapySDR::Range(-30, 0);
         } else {
             throw std::runtime_error(std::string("Unsupported gain: ") + name);
         }
@@ -513,6 +464,7 @@ public:
                       const double frequency, 
                       const SoapySDR::Kwargs &args)
     {
+        const std::lock_guard<std::mutex> lock(devMutex);
         if (direction != SOAPY_SDR_RX and channel != 1) {
             SoapySDR_logf(SOAPY_SDR_ERROR, "setFrequency: invalid direction/channel");
             return;
@@ -533,6 +485,7 @@ public:
 
     double getFrequency(const int direction, const size_t channel, const std::string &name) const
     {
+        const std::lock_guard<std::mutex> lock(devMutex);
         if (direction != SOAPY_SDR_RX and channel != 1) {
             SoapySDR_logf(SOAPY_SDR_ERROR, "getFrequency: invalid direction/channel");
             return SOAPY_SDR_NOT_SUPPORTED;
@@ -583,11 +536,11 @@ public:
 
 
     void setSampleRate(const int direction, const size_t channel, const double rate) {
+        const std::lock_guard<std::mutex> lock(devMutex);
         if (direction != SOAPY_SDR_RX and channel != 1) {
             SoapySDR_logf(SOAPY_SDR_ERROR, "setSampleRate: invalid direction/channel");
             return;
         }
-        readMut = true;
         for (auto &sr: smSamplerate) {
             if (sr.second > rate) {
                 continue;
@@ -609,6 +562,7 @@ public:
 
     double getSampleRate(const int direction, const size_t channel) const
     {
+        const std::lock_guard<std::mutex> lock(devMutex);
         if (direction != SOAPY_SDR_RX and channel != 1) {
             SoapySDR_logf(SOAPY_SDR_ERROR, "getSampleRate: invalid direction/channel");
             return SOAPY_SDR_NOT_SUPPORTED;
@@ -647,12 +601,11 @@ public:
 
     void setBandwidth(const int direction, const size_t channel, const double bw)
     {
+        const std::lock_guard<std::mutex> lock(devMutex);
         if (direction != SOAPY_SDR_RX and channel != 1) {
             SoapySDR_logf(SOAPY_SDR_ERROR, "setBandwidth: invalid direction/channel");
             return;
         }
-        // Block if samplerate is changing
-        while(readMut);
         if (bw > smBandwidth.at(decimation)) {
             bandwidth = smBandwidth.at(decimation);
             SoapySDR_logf(SOAPY_SDR_WARNING, "setBandwidth: %lf clamped to %lf due to sample rate limits", bw, smBandwidth.at(decimation));  
@@ -664,6 +617,7 @@ public:
 
     double getBandwidth(const int direction, const size_t channel) const
     {
+        const std::lock_guard<std::mutex> lock(devMutex);
         if (direction != SOAPY_SDR_RX and channel != 1) {
             SoapySDR_logf(SOAPY_SDR_ERROR, "getBandwidth: invalid direction/channel");
             return SOAPY_SDR_NOT_SUPPORTED;
@@ -706,7 +660,6 @@ public:
 
     void updateConfig(bool srChange=false)
     {
-        readMut = true;
         if (srChange) {
             // Abort current proccess
             smAbort(deviceId);
@@ -718,17 +671,10 @@ public:
         // Configure device
         smSetIQBandwidth(deviceId, smTrue, bandwidth);
         smSetIQCenterFreq(deviceId, centerFrequency);
-        if (autoAtten) {
-            smSetRefLevel(deviceId, SM_DEFAULT_REF);
-            smSetAttenuator(deviceId, SM_AUTO_ATTEN);
-        } else {
-            smSetRefLevel(deviceId, refLevel);
-            smSetAttenuator(deviceId, attenLevel);
-        }
+        smSetAttenuator(deviceId, ((int)attenLevel)/-5);
 
         // Activate configuration
         smConfigure(deviceId, smModeIQStreaming);
-        readMut = false;
     }
 
 };
