@@ -18,6 +18,41 @@
 // Defines
 #define SM_DEFAULT_REF -20
 
+static SmDeviceType SMStringToType(std::string typeString)
+{
+    SmDeviceType type = smDeviceTypeSM200A;
+    if (typeString == "SM200A") {
+        type = smDeviceTypeSM200A;    
+    } else if (typeString == "SM200B") {
+        type = smDeviceTypeSM200B;
+    } else if (typeString == "SM200C") {
+        type = smDeviceTypeSM200C;
+    } else if (typeString == "SM435B") {
+        type = smDeviceTypeSM435B;
+    } else if (typeString == "SM435C") {
+        type = smDeviceTypeSM435C;
+    }
+    return type;
+}
+
+static std::string SMTypeToString(SmDeviceType type)
+{
+    std::string typeString = "";
+
+    if (type == smDeviceTypeSM200A) {
+        typeString = "SM200A";    
+    } else if (type == smDeviceTypeSM200B) {
+        typeString = "SM200B";
+    } else if (type == smDeviceTypeSM200C) {
+        typeString = "SM200C";
+    } else if (type == smDeviceTypeSM435B) {
+        typeString = "SM435B";
+    } else if (type == smDeviceTypeSM435C) {
+        typeString = "SM435C";
+    }
+    return typeString;
+}
+
 /***********************************************************************
  * Device interface
  **********************************************************************/
@@ -26,41 +61,15 @@ private:
     // Variables used
     mutable std::mutex devMutex;
     bool serialSpecified;
-    int deviceId, serial, decimation, numDevices, type; 
+    int deviceHandle, serial, decimation, numDevices;
     int serials[SM_MAX_DEVICES];
     SmDeviceType types[SM_MAX_DEVICES];
-    double sampleRate, centerFrequency, bandwidth, attenLevel;
+    SmDeviceType type;
+    double sampleRate, centerFrequency, bandwidth, maxBW, attenLevel;
     SmStatus status;
-
-    // Decimation to max bandwidth with filters
-    const std::map<int, double> smBandwidth = {{4096, 9.375e3},
-                                               {2048, 18.75e3},
-                                               {1024, 37.5e3},
-                                               {512, 75e3},
-                                               {256, 150e3},
-                                               {128, 300e3},
-                                               {64, 600e3},
-                                               {32, 1.2e6},
-                                               {16, 2.4e6},
-                                               {8, 4.8e6},
-                                               {4, 9.6e6},
-                                               {2, 19.2e6},
-                                               {1, 41.5e6}};
-
-    // Decimation to samplerate
-    const std::map<int, double> smSamplerate = {{4096, 15e3},
-                                                {2048, 30e3},
-                                                {1024, 60e3},
-                                                {512, 120e3},
-                                                {256, 240e3},
-                                                {128, 480e3},
-                                                {64, 960e3},
-                                                {32, 1.92e6},
-                                                {16, 3.84e6},
-                                                {8, 7.68e6},
-                                                {4, 15.36e6},
-                                                {2, 30.72e6},
-                                                {1, 61.44e6}};
+    const double maxSmSfpSampleRate = 200e6;
+    const double maxSmUsbSampleRate = 50e6;
+    const float sampleToBwRatio = 0.8;
 
 public:
     
@@ -71,93 +80,78 @@ public:
     SignalHoundSM(const SoapySDR::Kwargs &args) 
     {
         // Defaults
-        serialSpecified = false;
-        deviceId = -1;
+        SmStatus status = smNoError;
+        deviceHandle = -1;
         serial = 0;
-        decimation = 1;
+        decimation = 4096; // Minimum samplerate when starting up
         numDevices = SM_MAX_DEVICES;
-        type = 0;
-        sampleRate = 61.44e6;
+        type = smDeviceTypeSM200A;
+        sampleRate = maxSmUsbSampleRate / decimation;
         centerFrequency = 100e6;
-        bandwidth = 41.5e6;
+        bandwidth = sampleRate * sampleToBwRatio;
+        maxBW = bandwidth;
         attenLevel = -1;
 
-        // Read provided serial
-        if (args.count("serial") != 0) {
-            try {
-                serial = std::stoull(args.at("serial"), nullptr, 10);
-            } catch (const std::invalid_argument &) {
-                throw std::runtime_error("serial is not a number");
-            } catch (const std::out_of_range &) {
-                throw std::runtime_error("serial value of out range");
-            }
-            serialSpecified = true;
+        if(args.count("type")) {
+            if(SMStringToType(args.at("type")) == smDeviceTypeSM200C ||
+               SMStringToType(args.at("type")) == smDeviceTypeSM435C) {
+                if(args.count("hostAddr") &&
+                   args.count("deviceAddr") &&
+                   args.count("port")) {
+                    std::string hostAddr = args.at("hostAddr");
+                    std::string deviceAddr = args.at("deviceAddr");
+                    int port = std::stoi(args.at("port"));
 
-        // Read provided device id
-        } else if (args.count("device_id") != 0) {
-            try {
-                deviceId = std::stoi(args.at("device_id"));
-            } catch (const std::invalid_argument &) {
-                throw std::runtime_error("device_id is not a number");
-            } catch (const std::out_of_range &) {
-                throw std::runtime_error("device_id of out range");
-            }
-        }
+                    if((status = smOpenNetworkedDevice(&deviceHandle, hostAddr.c_str(), deviceAddr.c_str(), port)) != smNoError) {
+                        throw std::runtime_error("Unable to open IP SM device with HostAddr "
+                                                        + hostAddr
+                                                        + " DeviceAddr "
+                                                        + deviceAddr 
+                                                        + " Port "
+                                                        + args.at("port"));
+                    }
+                } else {
+                    status = smOpenNetworkedDevice(&deviceHandle, SM200_ADDR_ANY, SM200_DEFAULT_ADDR, SM200_DEFAULT_PORT);
+                }
+            } else if (SMStringToType(args.at("type")) == smDeviceTypeSM200A ||
+                       SMStringToType(args.at("type")) == smDeviceTypeSM200B ||
+                       SMStringToType(args.at("type")) == smDeviceTypeSM435B) {
+                if(args.count("serial")) {
+                    serial = std::stoull(args.at("serial"), nullptr, 10);
 
-        // Retrieve device list
-        status = smGetDeviceList2(serials, types, &numDevices);
-        if (status != smNoError) {
-            throw std::runtime_error("Failed to retrieve list of SM devices");
-        }
-
-        if (numDevices < 1) {
-            throw std::runtime_error("No SM devices found");
-        }
-
-        // Find serial in device list
-        if (serialSpecified) {
-            for (int i = 0; i < numDevices; i++) {
-                if (serials[i] == serial) {
-                    deviceId = i;
-                    break;
+                    // Open device 
+                    if((status = smOpenDeviceBySerial(&deviceHandle, serial)) != smNoError) {
+                        throw std::runtime_error("Unable to open USB SM device with S/N "
+                                                        + std::to_string(serial));
+                    }
+                } else {
+                    status = smOpenDevice(&deviceHandle);
                 }
             }
-            if (deviceId < 0) {
-                throw std::runtime_error("SM device with S/N " 
-                                            + std::to_string(serial) 
-                                            + " not found");
+            
+            if (deviceHandle != -1) {
+                // Configure device defaults
+                status = smGetDeviceInfo(deviceHandle, &type, &serial);
+                printf("smGetDeviceInfo status %d\n", status);
+                status = smSetIQCenterFreq(deviceHandle, centerFrequency);
+                printf("smSetIQCenterFreq status %d\n", status);
+                status = smSetIQSampleRate(deviceHandle, decimation);
+                printf("smSetIQSampleRate status %d\n", status);
+                status = smSetIQBandwidth(deviceHandle, smTrue, bandwidth);
+                printf("smSetIQBandwidth status %d\n", status);
+                status = smSetAttenuator(deviceHandle, attenLevel);
+                printf("smSetAttenuator status %d\n", status);
+            } else {
+                throw std::runtime_error("Unable to open any SM device");
             }
-        } else {
-            if (deviceId < 0) {
-                deviceId = 0; // Default
-            } else if (deviceId >= numDevices) {
-                throw std::runtime_error("SM device_id out of range [0 .. " 
-                                            + std::to_string(numDevices-1) 
-                                            + "].");
-            }
-            serial = serials[deviceId];
         }
-
-        // Open device 
-        if ((status = smOpenDeviceBySerial(&deviceId, serial)) != smNoError) {
-            throw std::runtime_error("Unable to open SM device " 
-                                            + std::to_string(deviceId) 
-                                            + " with S/N " 
-                                            + std::to_string(serial));
-        }
-        type = types[deviceId];
-
-        // Configure device defaults
-        smSetIQCenterFreq(deviceId, centerFrequency);
-        smSetIQSampleRate(deviceId, decimation);
-        smSetIQBandwidth(deviceId, smTrue, bandwidth);
-        smSetAttenuator(deviceId, attenLevel);
     }
 
     ~SignalHoundSM(void)
     {
-        smAbort(deviceId);
-        smCloseDevice(deviceId);
+        SoapySDR_logf(SOAPY_SDR_INFO, "~SignalHoundSM Abort Called");
+        smAbort(deviceHandle);
+        smCloseDevice(deviceHandle);
     }
 
     /*******************************************************************
@@ -171,20 +165,20 @@ public:
 
     std::string getHardwareKey(void) const
     {
+        std::string hardwareKey = "";
         const std::lock_guard<std::mutex> lock(devMutex);
         if (type == smDeviceTypeSM200A) {
-            return "Signal Hound SM200A";    
+            hardwareKey = "Signal Hound SM200A";    
         } else if (type == smDeviceTypeSM200B) {
-            return "Signal Hound SM200B";
+            hardwareKey = "Signal Hound SM200B";
         } else if (type == smDeviceTypeSM200C) {
-            return "Signal Hound SM200C";
+            hardwareKey = "Signal Hound SM200C";
         } else if (type == smDeviceTypeSM435B) {
-            return "Signal Hound SM435B";
+            hardwareKey = "Signal Hound SM435B";
         } else if (type == smDeviceTypeSM435C) {
-            return "Signal Hound SM435C";
-        } else {
-            return "Signal Hound SM"; 
-        }    
+            hardwareKey = "Signal Hound SM435C";
+        } 
+        return hardwareKey;
     }
 
     SoapySDR::Kwargs getHardwareInfo(void) const
@@ -194,16 +188,15 @@ public:
         int firmmaj = 0;
         int firmmin = 0;
         int firmrev = 0;
-        smGetFirmwareVersion(deviceId, &firmmaj, &firmmin, &firmrev);
+        smGetFirmwareVersion(deviceHandle, &firmmaj, &firmmin, &firmrev);
 
         // Get diagnostics
         float temp, volt, curr;
-        smGetDeviceDiagnostics(deviceId, &volt, &curr, &temp);
+        smGetDeviceDiagnostics(deviceHandle, &volt, &curr, &temp);
 
         // Place into in Kwargs dictionary
         SoapySDR::Kwargs args;
 
-        args["device_id"] = std::to_string(deviceId);
         args["serial"] = std::to_string(serial);
         args["api_version"] = smGetAPIVersion();
         args["firmware:major"] = std::to_string(firmmaj);
@@ -284,10 +277,10 @@ public:
         // Check format
         if (format == SOAPY_SDR_CF32) {
             SoapySDR_log(SOAPY_SDR_INFO, "Using format CF32");
-            smSetIQDataType(deviceId, smDataType32fc);
+            smSetIQDataType(deviceHandle, smDataType32fc);
         } else if (format == SOAPY_SDR_CS16) {
             SoapySDR_log(SOAPY_SDR_INFO, "Using format CS16");
-            smSetIQDataType(deviceId, smDataType16sc);
+            smSetIQDataType(deviceHandle, smDataType16sc);
         } else {
             throw std::runtime_error("setupStream: Invalid format '" + format
                             + "' -- Only CF32 and CS16 are supported by SignalHoundSM module.");
@@ -297,7 +290,8 @@ public:
 
     void closeStream(SoapySDR::Stream *stream) {
         const std::lock_guard<std::mutex> lock(devMutex);
-        smAbort(deviceId);
+        SoapySDR_logf(SOAPY_SDR_INFO, "closeStream Abort Called");
+        smAbort(deviceHandle);
     }
 
     // size_t getStreamMTU(SoapySDR::Stream *stream) const{}
@@ -312,6 +306,7 @@ public:
             return SOAPY_SDR_NOT_SUPPORTED;
         }
 
+        SoapySDR_logf(SOAPY_SDR_INFO, "activateStream updateConfig Called");
         updateConfig();
         return 0;
     }
@@ -319,7 +314,8 @@ public:
     int deactivateStream(SoapySDR::Stream *stream, const int flags = 0, const long long timeNs = 0)
     {
         const std::lock_guard<std::mutex> lock(devMutex);
-        status = smAbort(deviceId);
+        SoapySDR_logf(SOAPY_SDR_INFO, "deactivateStream Abort Called");
+        status = smAbort(deviceHandle);
         return status;
     }
 
@@ -335,13 +331,14 @@ public:
         const auto start = std::chrono::high_resolution_clock::now();
 
         // Grab IQ data
-        status = smGetIQ(deviceId, *buffs, numElems, 0, 0, 0, smFalse, 0, 0);
+        status = smGetIQ(deviceHandle, *buffs, numElems, 0, 0, 0, smFalse, 0, 0);
         if (status > smNoError) {
             SoapySDR_logf(SOAPY_SDR_WARNING, "GetIQ: %s", smGetErrorString(status));
             std::this_thread::sleep_for(std::chrono::microseconds(timeoutUs));
         }
         if (status < smNoError) {
             SoapySDR_logf(SOAPY_SDR_ERROR, "GetIQ: %s", smGetErrorString(status));
+            SoapySDR_logf(SOAPY_SDR_INFO, "readStream updateConfig Called");
             updateConfig(true);
         }
 
@@ -418,6 +415,7 @@ public:
             throw std::runtime_error(std::string("Unknown GAIN ")+name);
             return;
         }
+        SoapySDR_logf(SOAPY_SDR_INFO, "setGain updateConfig Called");
         updateConfig();
     }
 
@@ -474,6 +472,7 @@ public:
             return;
         }
         centerFrequency = frequency;
+        SoapySDR_logf(SOAPY_SDR_INFO, "setFrequency updateConfig Called");
         updateConfig();
         return;
     }
@@ -541,22 +540,25 @@ public:
             SoapySDR_logf(SOAPY_SDR_ERROR, "setSampleRate: invalid direction/channel");
             return;
         }
-        for (auto &sr: smSamplerate) {
-            if (sr.second > rate) {
-                continue;
-            } else {
-                sampleRate = sr.second;
-                if (sampleRate != rate) {
-                    SoapySDR_logf(SOAPY_SDR_WARNING, "setSampleRate: %lf clamped to nearest valid sample rate %lf ", rate, sr.second);
-                }
-                decimation = sr.first;
-                if (bandwidth > smBandwidth.at(decimation)) {
-                    SoapySDR_logf(SOAPY_SDR_WARNING, "setSampleRate: bandwidth %lf clamped to %lf due to sample rate limits", bandwidth, smBandwidth.at(decimation));
-                    bandwidth = smBandwidth.at(decimation);    
-                }
-                break;
-            }
+
+        if (type == smDeviceTypeSM200A ||type == smDeviceTypeSM200B || type == smDeviceTypeSM435B) {
+            sampleRate = maxSmUsbSampleRate;
+        } else if (type == smDeviceTypeSM200C || type == smDeviceTypeSM435C) {
+            sampleRate = maxSmUsbSampleRate;
+        } 
+
+        decimation = 1;
+
+        while(sampleRate >=  rate) {
+            sampleRate /= 2;
+            decimation++;
         }
+
+        bandwidth = sampleRate * sampleToBwRatio;
+        maxBW = bandwidth;
+
+        SoapySDR_logf(SOAPY_SDR_WARNING, "setSampleRate: %lf clamped to nearest valid sample rate %lf ", rate, sampleRate);
+        SoapySDR_logf(SOAPY_SDR_INFO, "setSampleRate updateConfig Called");
         updateConfig(true);
     }
 
@@ -577,8 +579,17 @@ public:
             SoapySDR_logf(SOAPY_SDR_ERROR, "getSampleRateRange: invalid direction/channel");
             return results;
         }
-        for(auto &sr: smSamplerate) {
-            results.push_back(SoapySDR::Range(sr.second,sr.second));
+
+        double tempSampleRate = 0.0;
+        if (type == smDeviceTypeSM200A ||type == smDeviceTypeSM200B || type == smDeviceTypeSM435B) {
+            tempSampleRate = maxSmUsbSampleRate;
+        } else if (type == smDeviceTypeSM200C || type == smDeviceTypeSM435C) {
+            tempSampleRate = maxSmUsbSampleRate;
+        }
+
+        for(int tempDecimation = 1; tempDecimation <= 4096; tempDecimation *= 2) {
+            results.push_back(SoapySDR::Range(tempSampleRate,tempSampleRate));
+            tempSampleRate /= 2;
         }
 
         return results;
@@ -589,8 +600,16 @@ public:
     {
         SoapySDR_log(SOAPY_SDR_WARNING, "listSampleRates: This function is deprecrated.");
         std::vector<double> results;
-        for(auto &sr: smSamplerate) {
-            results.insert(results.begin(),sr.second);
+        double tempSampleRate = 0.0;
+        if (type == smDeviceTypeSM200A ||type == smDeviceTypeSM200B || type == smDeviceTypeSM435B) {
+            tempSampleRate = maxSmUsbSampleRate;
+        } else if (type == smDeviceTypeSM200C || type == smDeviceTypeSM435C) {
+            tempSampleRate = maxSmUsbSampleRate;
+        }
+
+        for(int tempDecimation = 1; tempDecimation >= 4096; tempDecimation *= 2) {
+            results.push_back(tempSampleRate);
+            tempSampleRate /= 2;
         }
         return results;
     }     
@@ -606,12 +625,13 @@ public:
             SoapySDR_logf(SOAPY_SDR_ERROR, "setBandwidth: invalid direction/channel");
             return;
         }
-        if (bw > smBandwidth.at(decimation)) {
-            bandwidth = smBandwidth.at(decimation);
-            SoapySDR_logf(SOAPY_SDR_WARNING, "setBandwidth: %lf clamped to %lf due to sample rate limits", bw, smBandwidth.at(decimation));  
+        if (bw > maxBW) {
+            bandwidth = maxBW;
+            SoapySDR_logf(SOAPY_SDR_WARNING, "setBandwidth: %lf clamped to %lf due to sample rate limits", bw, maxBW);  
         } else {
             bandwidth = bw;
         }
+        SoapySDR_logf(SOAPY_SDR_INFO, "setBandwidth updateConfig Called");
         updateConfig();
     }
 
@@ -632,7 +652,7 @@ public:
             SoapySDR_logf(SOAPY_SDR_ERROR, "getBandwidthRange: invalid direction/channel");
             return results;
         }
-        results.push_back(SoapySDR::Range(0,smBandwidth.at(decimation)));
+        results.push_back(SoapySDR::Range(0,maxBW));
         return results;
     }
 
@@ -641,7 +661,7 @@ public:
     {
         SoapySDR_log(SOAPY_SDR_WARNING, "listBandwidths: This function is deprecrated.");
         std::vector<double> results;
-        results.insert(results.begin(), smBandwidth.at(decimation));
+        results.insert(results.begin(), maxBW);
         return results;
     }
 
@@ -651,7 +671,7 @@ public:
 
     void* getNativeDeviceHandle(void) const
     {
-        return (void*) &deviceId;
+        return (void*) &deviceHandle;
     }
 
     /*******************************************************************
@@ -660,21 +680,23 @@ public:
 
     void updateConfig(bool srChange=false)
     {
+        SmStatus status = smNoError;
         if (srChange) {
             // Abort current proccess
-            smAbort(deviceId);
+            SoapySDR_logf(SOAPY_SDR_INFO, "updateConfig Abort Called");
+            status = smAbort(deviceHandle);
             SoapySDR_logf(SOAPY_SDR_INFO, "SM: changing samplerate...");
             // Give time for abort to complete
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
 
         // Configure device
-        smSetIQBandwidth(deviceId, smTrue, bandwidth);
-        smSetIQCenterFreq(deviceId, centerFrequency);
-        smSetAttenuator(deviceId, ((int)attenLevel)/-5);
+        status = smSetIQBandwidth(deviceHandle, smTrue, bandwidth);
+        status = smSetIQCenterFreq(deviceHandle, centerFrequency);
+        status = smSetAttenuator(deviceHandle, ((int)attenLevel)/-5);
 
         // Activate configuration
-        smConfigure(deviceId, smModeIQStreaming);
+        status = smConfigure(deviceHandle, smModeIQStreaming);
     }
 
 };
@@ -682,40 +704,103 @@ public:
 /***********************************************************************
  * Find available devices
  **********************************************************************/
+
 SoapySDR::KwargsList findSignalHoundSM(const SoapySDR::Kwargs &args)
 {
-    int serials[SM_MAX_DEVICES]; 
-    SmDeviceType types[SM_MAX_DEVICES];
-    int count = SM_MAX_DEVICES;
-    SmStatus status = smGetDeviceList2(serials, types, &count);
-    if(status != smNoError) {
-        SoapySDR_logf(SOAPY_SDR_ERROR, "Error: %s\n", smGetErrorString(status));
-    }
+    int handle = -1;
+    SmStatus status = smNoError;
+    int serialNumber = 0;
+    SmDeviceType type;   
+    std::string hostAddr = SM200_ADDR_ANY;
+    std::string deviceAddr = SM200_DEFAULT_ADDR;
+    int port = SM200_DEFAULT_PORT;
 
     SoapySDR::KwargsList devices;
 
-    for(int i = 0; i < count; i++) {
+    if(args.count("hostAddr") &&
+       args.count("deviceAddr") &&
+       args.count("port")) {
+        hostAddr = args.at("hostAddr");
+        deviceAddr = args.at("deviceAddr");
+        port = std::stoi(args.at("port"));
+        
+    }
+    // Look for Networked SM
+    status = smOpenNetworkedDevice(&handle, hostAddr.c_str(), deviceAddr.c_str(), port);
+    if(status == smNoError) {
+        smGetDeviceInfo(handle, &type, &serialNumber);
+        smCloseDevice(handle);
+
         SoapySDR::Kwargs deviceInfo;
 
-        deviceInfo["device_id"] = std::to_string(i);
-        if (types[i] == smDeviceTypeSM200A) {
-            deviceInfo["label"] = "SM200A [" + std::to_string(serials[i]) + "]";    
-        } else if (types[i] == smDeviceTypeSM200B) {
-            deviceInfo["label"] = "SM200B [" + std::to_string(serials[i]) + "]";
-        } else if (types[i] == smDeviceTypeSM200C) {
-            deviceInfo["label"] = "SM200C [" + std::to_string(serials[i]) + "]";
-        } else if (types[i] == smDeviceTypeSM435B) {
-            deviceInfo["label"] = "SM435B [" + std::to_string(serials[i]) + "]";
-        } else if (types[i] == smDeviceTypeSM435C) {
-            deviceInfo["label"] = "SM435C [" + std::to_string(serials[i]) + "]";
-        } else {
-            deviceInfo["label"] = "SM [" + std::to_string(serials[i]) + "]"; 
+        deviceInfo["hostAddr"] = hostAddr;
+        deviceInfo["deviceAddr"] = deviceAddr;
+        deviceInfo["port"] = std::to_string(port);
+        if (type == smDeviceTypeSM200C) {
+            deviceInfo["type"] = SMTypeToString(type);
+            deviceInfo["label"] = "SM200C [" + std::to_string(serialNumber) + "]";
+        } else if (type == smDeviceTypeSM435C) {
+            deviceInfo["type"] = SMTypeToString(type);
+            deviceInfo["label"] = "SM435C [" + std::to_string(serialNumber) + "]";
         } 
-        deviceInfo["serial"] = std::to_string(serials[i]);
+        deviceInfo["serial"] = std::to_string(serialNumber);
 
         devices.push_back(deviceInfo);
     }
 
+    // Look for USB SM
+    int serials[SM_MAX_DEVICES]; 
+    SmDeviceType types[SM_MAX_DEVICES];
+    int count = SM_MAX_DEVICES;
+    status = smGetDeviceList2(serials, types, &count);
+    if(status != smNoError) {
+        SoapySDR_logf(SOAPY_SDR_ERROR, "Error: %s\n", smGetErrorString(status));
+    }
+
+    for(int i = 0; i < count; i++) {
+        SoapySDR::Kwargs deviceInfo;
+
+        if (types[i] == smDeviceTypeSM200A) {
+            deviceInfo["type"] = SMTypeToString(types[i]);
+            deviceInfo["label"] = "SM200A [" + std::to_string(serials[i]) + "]";    
+        } else if (types[i] == smDeviceTypeSM200B) {
+            deviceInfo["type"] = SMTypeToString(types[i]);
+            deviceInfo["label"] = "SM200B [" + std::to_string(serials[i]) + "]";
+        } else if (types[i] == smDeviceTypeSM435B) {
+            deviceInfo["type"] = SMTypeToString(types[i]);
+            deviceInfo["label"] = "SM435B [" + std::to_string(serials[i]) + "]";
+        }
+        deviceInfo["serial"] = std::to_string(serials[i]);
+        devices.push_back(deviceInfo);
+    }
+
+    // Filter Device List Based on args
+    for(int i = 0; i < static_cast<int>(devices.size()); i++)
+    {
+            for (auto it = devices[i].begin(); it != devices[i].end(); it++)
+    {
+        std::cout << it->first    // string (key)
+                << ':'
+                << it->second   // string's value 
+                << std::endl;
+    }
+        // Remove all devices that don't contain IP specific device info
+        if(args.count("hostAddr") &&
+           args.count("deviceAddr") &&
+           args.count("port")) {
+            if(!devices[i].count("hostAddr")) {
+                devices.erase(devices.begin() + i);
+            }
+        } else if(args.count("type")) {
+            if(devices[i].at("type") != args.at("type")) {
+                devices.erase(devices.begin() + i);
+            }
+        } else if(args.count("serial")) {
+            if(devices[i].at("serial") != args.at("serial")) {
+                devices.erase(devices.begin() + i);
+            }
+        }
+    }
     return devices;
 }
 
