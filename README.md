@@ -54,6 +54,10 @@ Note: if a SM200B or SM435B device is plugged in, `SoapySDRUtil --find` will dis
 
 ## Usage
 
-- `#include <SoapySDR/Device.hpp>` and use the functions in [Device.hpp](https://github.com/pothosware/SoapySDR/blob/master/include/SoapySDR/Device.hpp) to interface with the SM200B or SM435B.
+- `#include <SoapySDR/Device.hpp>` and use the functions in [Device.hpp](https://github.com/pothosware/SoapySDR/blob/master/include/SoapySDR/Device.hpp) to interface with the SM family devices.
+
+- When trying to connect to an SFP+ based device that does not use the default password you will need to pass in parameters for the hostAddr, deviceAddr, an port such as shown below with the Soapy
+
+    SoapySDRUtil --find="hostAddr=192.168.2.2,deviceAddr=192.168.2.11,port=51665"
 
 - Use with [other platforms](https://github.com/pothosware/SoapySDR/wiki#platforms) that are compatible with SoapySDR such as [GNU Radio Companion](https://www.gnuradio.org/), [SDRangel](https://www.sdrangel.org/), and many others.

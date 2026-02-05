@@ -59,8 +59,6 @@ static std::string SMTypeToString(SmDeviceType type)
 class SignalHoundSM : public SoapySDR::Device {
 private:
     // Variables used
-    mutable std::mutex devMutex;
-    bool serialSpecified;
     int deviceHandle, serial, decimation, numDevices;
     int serials[SM_MAX_DEVICES];
     SmDeviceType types[SM_MAX_DEVICES];
@@ -70,7 +68,9 @@ private:
     const double maxSmSfpSampleRate = 200e6;
     const double maxSmUsbSampleRate = 50e6;
     const float sampleToBwRatio = 0.8;
-
+    std::string hostAddr;
+    std::string deviceAddr;
+    int port;
 public:
     
     /*******************************************************************
@@ -83,73 +83,67 @@ public:
         SmStatus status = smNoError;
         deviceHandle = -1;
         serial = 0;
-        decimation = 4096; // Minimum samplerate when starting up
+        decimation = 1;
         numDevices = SM_MAX_DEVICES;
         type = smDeviceTypeSM200A;
-        sampleRate = maxSmUsbSampleRate / decimation;
         centerFrequency = 100e6;
-        bandwidth = sampleRate * sampleToBwRatio;
-        maxBW = bandwidth;
         attenLevel = -1;
+        hostAddr = SM200_ADDR_ANY;
+        deviceAddr = SM200_DEFAULT_ADDR;
+        port = SM200_DEFAULT_PORT;
 
-        if(args.count("type")) {
-            if(SMStringToType(args.at("type")) == smDeviceTypeSM200C ||
-               SMStringToType(args.at("type")) == smDeviceTypeSM435C) {
-                if(args.count("hostAddr") &&
-                   args.count("deviceAddr") &&
-                   args.count("port")) {
-                    std::string hostAddr = args.at("hostAddr");
-                    std::string deviceAddr = args.at("deviceAddr");
-                    int port = std::stoi(args.at("port"));
+        if(args.count("hostAddr") &&
+           args.count("deviceAddr") &&
+           args.count("port")) {
+            hostAddr = args.at("hostAddr");
+            deviceAddr = args.at("deviceAddr");
+            port = std::stoi(args.at("port"));
 
-                    if((status = smOpenNetworkedDevice(&deviceHandle, hostAddr.c_str(), deviceAddr.c_str(), port)) != smNoError) {
-                        throw std::runtime_error("Unable to open IP SM device with HostAddr "
-                                                        + hostAddr
-                                                        + " DeviceAddr "
-                                                        + deviceAddr 
-                                                        + " Port "
-                                                        + args.at("port"));
-                    }
-                } else {
-                    status = smOpenNetworkedDevice(&deviceHandle, SM200_ADDR_ANY, SM200_DEFAULT_ADDR, SM200_DEFAULT_PORT);
-                }
-            } else if (SMStringToType(args.at("type")) == smDeviceTypeSM200A ||
-                       SMStringToType(args.at("type")) == smDeviceTypeSM200B ||
-                       SMStringToType(args.at("type")) == smDeviceTypeSM435B) {
-                if(args.count("serial")) {
-                    serial = std::stoull(args.at("serial"), nullptr, 10);
-
-                    // Open device 
-                    if((status = smOpenDeviceBySerial(&deviceHandle, serial)) != smNoError) {
-                        throw std::runtime_error("Unable to open USB SM device with S/N "
-                                                        + std::to_string(serial));
-                    }
-                } else {
-                    status = smOpenDevice(&deviceHandle);
-                }
+            if((status = smOpenNetworkedDevice(&deviceHandle, hostAddr.c_str(), deviceAddr.c_str(), port)) != smNoError) {
+                throw std::runtime_error("Unable to open IP SM device with HostAddr "
+                                                + hostAddr
+                                                + " DeviceAddr "
+                                                + deviceAddr 
+                                                + " Port "
+                                                + args.at("port"));
             }
-            
-            if (deviceHandle != -1) {
-                // Configure device defaults
-                status = smGetDeviceInfo(deviceHandle, &type, &serial);
-                printf("smGetDeviceInfo status %d\n", status);
-                status = smSetIQCenterFreq(deviceHandle, centerFrequency);
-                printf("smSetIQCenterFreq status %d\n", status);
-                status = smSetIQSampleRate(deviceHandle, decimation);
-                printf("smSetIQSampleRate status %d\n", status);
-                status = smSetIQBandwidth(deviceHandle, smTrue, bandwidth);
-                printf("smSetIQBandwidth status %d\n", status);
-                status = smSetAttenuator(deviceHandle, attenLevel);
-                printf("smSetAttenuator status %d\n", status);
+        } else if(args.count("serial")) {
+            serial = std::stoull(args.at("serial"), nullptr, 10);
+
+            // Open device 
+            if((status = smOpenDeviceBySerial(&deviceHandle, serial)) != smNoError) {
+                throw std::runtime_error("Unable to open USB SM device with S/N "
+                                                + std::to_string(serial));
+            }
+        } else {
+            // Try to open default IP based SM device first
+            status = smOpenNetworkedDevice(&deviceHandle, hostAddr.c_str(), deviceAddr.c_str(), port);
+
+            // If no IP device is found try to open a USB based device
+            if(deviceHandle == -1) {
+                status = smOpenDevice(&deviceHandle);
+            }
+        }
+
+        if(deviceHandle == -1) {
+            throw std::runtime_error("Unable to open SM device");
+        }
+
+        if(deviceHandle != -1) {
+            status = smGetDeviceInfo(deviceHandle, &type, &serial);
+            if(type == smDeviceTypeSM200A || type == smDeviceTypeSM200B || type == smDeviceTypeSM435B)
+            {
+                sampleRate = maxSmUsbSampleRate / decimation;
             } else {
-                throw std::runtime_error("Unable to open any SM device");
+                sampleRate = maxSmSfpSampleRate / decimation;
             }
+            bandwidth = sampleRate * sampleToBwRatio;
+            maxBW = bandwidth;
         }
     }
 
     ~SignalHoundSM(void)
     {
-        SoapySDR_logf(SOAPY_SDR_INFO, "~SignalHoundSM Abort Called");
         smAbort(deviceHandle);
         smCloseDevice(deviceHandle);
     }
@@ -166,7 +160,6 @@ public:
     std::string getHardwareKey(void) const
     {
         std::string hardwareKey = "";
-        const std::lock_guard<std::mutex> lock(devMutex);
         if (type == smDeviceTypeSM200A) {
             hardwareKey = "Signal Hound SM200A";    
         } else if (type == smDeviceTypeSM200B) {
@@ -183,7 +176,6 @@ public:
 
     SoapySDR::Kwargs getHardwareInfo(void) const
     {
-        const std::lock_guard<std::mutex> lock(devMutex);
         // Get firmware info
         int firmmaj = 0;
         int firmmin = 0;
@@ -220,7 +212,6 @@ public:
 
     SoapySDR::Kwargs getChannelInfo(const int direction, const size_t channel) const
     {
-        const std::lock_guard<std::mutex> lock(devMutex);
         SoapySDR::Kwargs args;
         if (direction != SOAPY_SDR_RX or channel != 1) {
             return args;
@@ -268,7 +259,14 @@ public:
                                   const std::vector<size_t> &channels = std::vector<size_t>(),
                                   const SoapySDR::Kwargs &args = SoapySDR::Kwargs()) 
     {
-        const std::lock_guard<std::mutex> lock(devMutex);
+        if(deviceHandle == -1)
+        {
+            if(type == smDeviceTypeSM435C || type == smDeviceTypeSM200C) {
+                status = smOpenNetworkedDevice(&deviceHandle, hostAddr.c_str(), deviceAddr.c_str(), port);
+            } else {
+                status = smOpenDeviceBySerial(&deviceHandle, serial);
+            }
+        }
         // Check channel config
         if (channels.size() > 1 or (channels.size() > 0 and channels.at(0) != 0)) {
             throw std::runtime_error("setupStream invalid channel selection");
@@ -285,13 +283,20 @@ public:
             throw std::runtime_error("setupStream: Invalid format '" + format
                             + "' -- Only CF32 and CS16 are supported by SignalHoundSM module.");
         }
+
+        // Configure device defaults
+        status = smSetIQCenterFreq(deviceHandle, centerFrequency);
+        status = smSetIQBaseSampleRate(deviceHandle, smIQStreamSampleRateNative);
+        status = smSetIQSampleRate(deviceHandle, decimation);
+        status = smSetIQBandwidth(deviceHandle, smTrue, bandwidth);
+        status = smSetAttenuator(deviceHandle, attenLevel);
+
         return (SoapySDR::Stream*) this;
     }
 
     void closeStream(SoapySDR::Stream *stream) {
-        const std::lock_guard<std::mutex> lock(devMutex);
-        SoapySDR_logf(SOAPY_SDR_INFO, "closeStream Abort Called");
-        smAbort(deviceHandle);
+        smCloseDevice(deviceHandle);
+        deviceHandle = -1;
     }
 
     // size_t getStreamMTU(SoapySDR::Stream *stream) const{}
@@ -301,20 +306,22 @@ public:
                        const long long timeNs = 0,
                        const size_t numElems = 0) 
     {
-        const std::lock_guard<std::mutex> lock(devMutex);
         if (flags != 0) {
             return SOAPY_SDR_NOT_SUPPORTED;
         }
 
-        SoapySDR_logf(SOAPY_SDR_INFO, "activateStream updateConfig Called");
-        updateConfig();
+        status = smConfigure(deviceHandle, smModeIQStreaming);
+
+        // Query the receiver IQ stream characteristics
+        // Should match what we set earlier
+        double actualSampleRate, actualBandwidth;
+        smGetIQParameters(deviceHandle, &actualSampleRate, &actualBandwidth);
+        SoapySDR_logf(SOAPY_SDR_INFO, "Actual Sample Rate = %lf Actual Bandwidth = %lf", actualSampleRate, actualBandwidth);
         return 0;
     }
 
     int deactivateStream(SoapySDR::Stream *stream, const int flags = 0, const long long timeNs = 0)
     {
-        const std::lock_guard<std::mutex> lock(devMutex);
-        SoapySDR_logf(SOAPY_SDR_INFO, "deactivateStream Abort Called");
         status = smAbort(deviceHandle);
         return status;
     }
@@ -326,20 +333,22 @@ public:
                    long long &timeNs,
                    const long timeoutUs = 100000)
     {
-        const std::lock_guard<std::mutex> lock(devMutex);
         // Start clock
         const auto start = std::chrono::high_resolution_clock::now();
 
         // Grab IQ data
-        status = smGetIQ(deviceHandle, *buffs, numElems, 0, 0, 0, smFalse, 0, 0);
+
+        int sampleLoss = 0;
+        int samplesRemaining = 0;
+        int64_t nsSinceEpoch = 0;
+        status = smGetIQ(deviceHandle, *buffs, numElems, 0, 0, &nsSinceEpoch, smFalse, &sampleLoss, &samplesRemaining);
         if (status > smNoError) {
             SoapySDR_logf(SOAPY_SDR_WARNING, "GetIQ: %s", smGetErrorString(status));
-            std::this_thread::sleep_for(std::chrono::microseconds(timeoutUs));
         }
+
         if (status < smNoError) {
             SoapySDR_logf(SOAPY_SDR_ERROR, "GetIQ: %s", smGetErrorString(status));
-            SoapySDR_logf(SOAPY_SDR_INFO, "readStream updateConfig Called");
-            updateConfig(true);
+            return SOAPY_SDR_STREAM_ERROR;
         }
 
         // Return time
@@ -403,7 +412,6 @@ public:
 
     void setGain(const int direction, const size_t channel, const std::string &name, const double value)
     {
-        const std::lock_guard<std::mutex> lock(devMutex);
         if (direction != SOAPY_SDR_RX and channel != 1) {
             SoapySDR_logf(SOAPY_SDR_ERROR, "setGain: invalid direction/channel");
             return; 
@@ -415,13 +423,10 @@ public:
             throw std::runtime_error(std::string("Unknown GAIN ")+name);
             return;
         }
-        SoapySDR_logf(SOAPY_SDR_INFO, "setGain updateConfig Called");
-        updateConfig();
     }
 
     double getGain(const int direction, const size_t channel, const std::string &name) const
     {
-        const std::lock_guard<std::mutex> lock(devMutex);
         if (direction != SOAPY_SDR_RX and channel != 1) {
             SoapySDR_logf(SOAPY_SDR_ERROR, "getGain: invalid direction/channel");
             return SOAPY_SDR_NOT_SUPPORTED; 
@@ -462,7 +467,6 @@ public:
                       const double frequency, 
                       const SoapySDR::Kwargs &args)
     {
-        const std::lock_guard<std::mutex> lock(devMutex);
         if (direction != SOAPY_SDR_RX and channel != 1) {
             SoapySDR_logf(SOAPY_SDR_ERROR, "setFrequency: invalid direction/channel");
             return;
@@ -472,8 +476,6 @@ public:
             return;
         }
         centerFrequency = frequency;
-        SoapySDR_logf(SOAPY_SDR_INFO, "setFrequency updateConfig Called");
-        updateConfig();
         return;
     }
 
@@ -484,7 +486,6 @@ public:
 
     double getFrequency(const int direction, const size_t channel, const std::string &name) const
     {
-        const std::lock_guard<std::mutex> lock(devMutex);
         if (direction != SOAPY_SDR_RX and channel != 1) {
             SoapySDR_logf(SOAPY_SDR_ERROR, "getFrequency: invalid direction/channel");
             return SOAPY_SDR_NOT_SUPPORTED;
@@ -525,7 +526,6 @@ public:
                 results.push_back(SoapySDR::Range(SM435_MIN_FREQ, SM435_MAX_FREQ));
             }
         }
-
         return results;
     }
 
@@ -535,7 +535,6 @@ public:
 
 
     void setSampleRate(const int direction, const size_t channel, const double rate) {
-        const std::lock_guard<std::mutex> lock(devMutex);
         if (direction != SOAPY_SDR_RX and channel != 1) {
             SoapySDR_logf(SOAPY_SDR_ERROR, "setSampleRate: invalid direction/channel");
             return;
@@ -544,27 +543,22 @@ public:
         if (type == smDeviceTypeSM200A ||type == smDeviceTypeSM200B || type == smDeviceTypeSM435B) {
             sampleRate = maxSmUsbSampleRate;
         } else if (type == smDeviceTypeSM200C || type == smDeviceTypeSM435C) {
-            sampleRate = maxSmUsbSampleRate;
+            sampleRate = maxSmSfpSampleRate;
         } 
 
         decimation = 1;
 
-        while(sampleRate >=  rate) {
+        while(sampleRate > rate) {
             sampleRate /= 2;
-            decimation++;
+            decimation *= 2;
         }
 
         bandwidth = sampleRate * sampleToBwRatio;
         maxBW = bandwidth;
-
-        SoapySDR_logf(SOAPY_SDR_WARNING, "setSampleRate: %lf clamped to nearest valid sample rate %lf ", rate, sampleRate);
-        SoapySDR_logf(SOAPY_SDR_INFO, "setSampleRate updateConfig Called");
-        updateConfig(true);
     }
 
     double getSampleRate(const int direction, const size_t channel) const
     {
-        const std::lock_guard<std::mutex> lock(devMutex);
         if (direction != SOAPY_SDR_RX and channel != 1) {
             SoapySDR_logf(SOAPY_SDR_ERROR, "getSampleRate: invalid direction/channel");
             return SOAPY_SDR_NOT_SUPPORTED;
@@ -584,27 +578,25 @@ public:
         if (type == smDeviceTypeSM200A ||type == smDeviceTypeSM200B || type == smDeviceTypeSM435B) {
             tempSampleRate = maxSmUsbSampleRate;
         } else if (type == smDeviceTypeSM200C || type == smDeviceTypeSM435C) {
-            tempSampleRate = maxSmUsbSampleRate;
+            tempSampleRate = maxSmSfpSampleRate;
         }
 
         for(int tempDecimation = 1; tempDecimation <= 4096; tempDecimation *= 2) {
             results.push_back(SoapySDR::Range(tempSampleRate,tempSampleRate));
             tempSampleRate /= 2;
         }
-
         return results;
     }
 
     // Deprecated dont use
     std::vector<double> listSampleRates(const int direction, const size_t channel) const
     {
-        SoapySDR_log(SOAPY_SDR_WARNING, "listSampleRates: This function is deprecrated.");
         std::vector<double> results;
         double tempSampleRate = 0.0;
         if (type == smDeviceTypeSM200A ||type == smDeviceTypeSM200B || type == smDeviceTypeSM435B) {
             tempSampleRate = maxSmUsbSampleRate;
         } else if (type == smDeviceTypeSM200C || type == smDeviceTypeSM435C) {
-            tempSampleRate = maxSmUsbSampleRate;
+            tempSampleRate = maxSmSfpSampleRate;
         }
 
         for(int tempDecimation = 1; tempDecimation >= 4096; tempDecimation *= 2) {
@@ -620,24 +612,20 @@ public:
 
     void setBandwidth(const int direction, const size_t channel, const double bw)
     {
-        const std::lock_guard<std::mutex> lock(devMutex);
         if (direction != SOAPY_SDR_RX and channel != 1) {
             SoapySDR_logf(SOAPY_SDR_ERROR, "setBandwidth: invalid direction/channel");
             return;
         }
         if (bw > maxBW) {
             bandwidth = maxBW;
-            SoapySDR_logf(SOAPY_SDR_WARNING, "setBandwidth: %lf clamped to %lf due to sample rate limits", bw, maxBW);  
+            SoapySDR_logf(SOAPY_SDR_INFO, "setBandwidth: %lf clamped to %lf.", bw, maxBW);  
         } else {
             bandwidth = bw;
         }
-        SoapySDR_logf(SOAPY_SDR_INFO, "setBandwidth updateConfig Called");
-        updateConfig();
     }
 
     double getBandwidth(const int direction, const size_t channel) const
     {
-        const std::lock_guard<std::mutex> lock(devMutex);
         if (direction != SOAPY_SDR_RX and channel != 1) {
             SoapySDR_logf(SOAPY_SDR_ERROR, "getBandwidth: invalid direction/channel");
             return SOAPY_SDR_NOT_SUPPORTED;
@@ -659,7 +647,6 @@ public:
     // Deprecated dont use
     std::vector<double> listBandwidths(const int direction, const size_t channel) const
     {
-        SoapySDR_log(SOAPY_SDR_WARNING, "listBandwidths: This function is deprecrated.");
         std::vector<double> results;
         results.insert(results.begin(), maxBW);
         return results;
@@ -673,32 +660,6 @@ public:
     {
         return (void*) &deviceHandle;
     }
-
-    /*******************************************************************
-     * Util API
-     ******************************************************************/
-
-    void updateConfig(bool srChange=false)
-    {
-        SmStatus status = smNoError;
-        if (srChange) {
-            // Abort current proccess
-            SoapySDR_logf(SOAPY_SDR_INFO, "updateConfig Abort Called");
-            status = smAbort(deviceHandle);
-            SoapySDR_logf(SOAPY_SDR_INFO, "SM: changing samplerate...");
-            // Give time for abort to complete
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
-        }
-
-        // Configure device
-        status = smSetIQBandwidth(deviceHandle, smTrue, bandwidth);
-        status = smSetIQCenterFreq(deviceHandle, centerFrequency);
-        status = smSetAttenuator(deviceHandle, ((int)attenLevel)/-5);
-
-        // Activate configuration
-        status = smConfigure(deviceHandle, smModeIQStreaming);
-    }
-
 };
 
 /***********************************************************************
